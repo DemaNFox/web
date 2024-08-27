@@ -1,0 +1,14 @@
+.then(response => {
+  if (response.ok) {
+    return response.text(); // Извлекаем тело ответа в виде текста (HTML)
+  } else {
+    throw new Error('Network response was not ok.');
+  }
+})
+.then(html => {
+  console.log(html); // Выводим HTML в консоль
+  // Здесь можно работать с полученным HTML, например, парсить его с помощью DOMParser или другой библиотеки
+})
+.catch(error => {
+  console.error('There has been a problem with your fetch operation:', error);
+});
