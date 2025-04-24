@@ -1,0 +1,16 @@
+  .then(response => {
+    // Проверка успешности ответа
+    if (!response.ok) {
+      throw new Error('Ошибка сети: ' + response.status);
+    }
+    // Возвращение тела ответа как текст
+    return response.text();
+  })
+  .then(data => {
+    // Работа с полученными данными
+    console.log(data);
+  })
+  .catch(error => {
+    // Обработка ошибок
+    console.error('Произошла ошибка:', error);
+  });
