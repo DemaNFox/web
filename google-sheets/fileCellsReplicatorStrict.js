@@ -11,8 +11,8 @@ function copySpecificCellsToSpecificSheets() {
 
 
     TARGETBOOK = "12RUe9CVoUvjLKHubFYvgN69fmOEB20Uo0YDaQhgQAng"
-
     XABA =  "Xaba"
+    
     const config = {
       XABA : {
         "targetSpreadsheetId": TARGETBOOK,
