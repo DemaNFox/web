@@ -22,7 +22,7 @@ Nest дает приложению форму. Он не запрещает пи
 2. DTO и pipes приводят вход к ожидаемому виду.
 3. Guards решают, можно ли вообще выполнять обработчик.
 4. Service выполняет прикладную логику.
-5. Repository, Prisma или TypeORM работают с хранилищем.
+5. Provider слоя данных работает с хранилищем.
 6. Interceptors оборачивают выполнение для логирования, метрик, трансформации ответа.
 7. Filters приводят ошибки к понятному формату.
 
@@ -47,7 +47,7 @@ Express и Fastify дают хороший фундамент для HTTP. Nest 
 - TypeScript становится не дополнением, а естественным способом описывать контракты;
 - есть Dependency Injection;
 - встроены модули, guards, pipes, interceptors, filters, testing utilities;
-- REST, GraphQL, WebSockets и microservices используют похожие идеи;
+- REST, WebSockets и microservices используют похожие идеи;
 - CLI быстро создает ресурсы и каркас;
 - код легче разделять по фичам.
 
@@ -67,7 +67,7 @@ nest g module infra/prisma
 nest g service infra/prisma
 ```
 
-`nest g resource` особенно удобен для старта фичи: он может создать module, controller/service или resolver/gateway в зависимости от выбранного transport. После генерации ресурс почти всегда надо почистить:
+`nest g resource` особенно удобен для старта фичи: он может создать module и transport entry point под выбранный режим. После генерации ресурс почти всегда надо почистить:
 
 - удалить handlers, которых в use case нет;
 - переименовать DTO под реальный контракт;
@@ -115,13 +115,12 @@ bootstrap();
 
 - CORS;
 - cookies middleware;
-- Swagger setup;
-- Helmet;
+- bootstrap helpers;
 - глобальный logger;
 - глобальные filters/interceptors;
 - версионирование API.
 
-`main.ts` не должен превращаться в свалку. Настройку Swagger, логгера или CORS удобно выносить в небольшие функции вроде `setupSwagger(app)`.
+`main.ts` не должен превращаться в свалку. Настройку логгера, CORS и глобальных компонентов удобно выносить в небольшие функции.
 
 ## 4. Архитектурное ядро
 
@@ -131,14 +130,13 @@ bootstrap();
 
 ```ts
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '../infra/prisma/prisma.module';
+import { MoviesRepository } from './movies.repository';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
 @Module({
-  imports: [PrismaModule],
   controllers: [UsersController],
-  providers: [UsersService],
+  providers: [UsersService, MoviesRepository],
   exports: [UsersService],
 })
 export class UsersModule {}
@@ -193,26 +191,21 @@ Provider это любой объект, который Nest умеет созд
 
 ```ts
 import { ConflictException, Injectable } from '@nestjs/common';
-import { PrismaService } from '../infra/prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.dto';
+import { UsersRepository } from './users.repository';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly usersRepository: UsersRepository) {}
 
   async create(dto: CreateUserDto) {
-    const exists = await this.prisma.user.findUnique({
-      where: { email: dto.email },
-      select: { id: true },
-    });
+    const exists = await this.usersRepository.findByEmail(dto.email);
 
     if (exists) {
       throw new ConflictException('User with this email already exists');
     }
 
-    return this.prisma.user.create({
-      data: dto,
-    });
+    return this.usersRepository.create(dto);
   }
 }
 ```
@@ -225,7 +218,7 @@ Nest сам создает зависимости через container:
 
 ```ts
 constructor(
-  private readonly prisma: PrismaService,
+  private readonly usersRepository: UsersRepository,
   private readonly config: ConfigService,
 ) {}
 ```
@@ -273,7 +266,7 @@ constructor(
 
 В большинстве backend-кода singleton правильнее. Request scope полезен редко: request-local cache, tenant context, сложный per-request trace state. Он увеличивает стоимость запроса и может распространиться вверх по dependency tree.
 
-Особенно осторожно со scope у gateways, Passport strategies и scheduler-like компонентов: им нужен singleton-style lifecycle.
+Особенно осторожно со scope у gateways и scheduler-like компонентов: им нужен singleton-style lifecycle.
 
 ### Lifecycle
 
@@ -324,9 +317,9 @@ src/
     users.controller.ts
     users.service.ts
     dto/
-  prisma/
-    prisma.module.ts
-    prisma.service.ts
+  persistence/
+    persistence.module.ts
+    movies.repository.ts
   common/
     decorators/
     filters/
@@ -344,13 +337,11 @@ src/
     statistics/
     api.module.ts
   infra/
-    prisma/
-    redis/
+    persistence/
     infra.module.ts
   common/
     decorators/
     guards/
-    strategies/
     utils/
   config/
   app.module.ts
@@ -361,7 +352,7 @@ src/
 
 - transport/API фич много;
 - инфраструктурные клиенты не хочется смешивать с доменом;
-- часть сервисов общая для REST, GraphQL, jobs или WebSockets.
+- часть сервисов общая для REST, scheduled work или WebSockets.
 
 Не начинайте проект с двадцати слоев ради "enterprise". Начните с фич и отделяйте инфраструктуру тогда, когда она реально появилась.
 
@@ -549,7 +540,7 @@ Pitfall: не делайте в pipe тяжелую бизнес-логику. �
 Практический ориентир:
 
 - cookie parser, correlation id, simple request logging before Nest handler: middleware;
-- JWT/roles/permissions: guards;
+- user access/roles/permissions: guards;
 - DTO validation and `id` parsing: pipes;
 - response envelope, timing, caching, metrics: interceptors;
 - consistent error body: filters.
@@ -764,311 +755,160 @@ app.useGlobalFilters(new HttpErrorFilter());
 - логируйте unexpected exceptions;
 - согласуйте error contract с frontend.
 
-## 12. Authentication and authorization
+## 12. Authentication and authorization in Nest
 
 ### Authentication vs authorization
 
-- Authentication: кто пользователь?
-- Authorization: что ему разрешено?
+- Authentication отвечает на вопрос "кто пришел в запросе?".
+- Authorization отвечает на вопрос "можно ли этому субъекту выполнить этот handler или use case?".
 
-JWT отвечает не за authorization целиком. JWT подтверждает identity и часть claims. Решение "можно ли удалить этот invoice" все равно живет в policy/guard/service.
+Для Nest важнее всего место этой логики в pipeline:
 
-### JWT flow
+- входные данные логина или регистрации приходят в controller через DTO;
+- проверка доступа к защищенному handler-у идет через guard;
+- данные текущего субъекта удобно доставать param decorator-ом;
+- роли, permissions или другой access context удобно передавать через metadata;
+- доменные проверки ownership остаются в service, если они зависят от конкретного ресурса.
 
-Практический flow из материалов:
+### Auth guard
 
-1. регистрация проверяет уникальность email;
-2. пароль хешируется через `argon2` или `bcrypt`;
-3. сервер выпускает access token и refresh token;
-4. access token идет клиенту для `Authorization: Bearer ...`;
-5. refresh token можно хранить в `HttpOnly` cookie;
-6. refresh endpoint проверяет cookie и выдает новую пару/новый access token;
-7. logout очищает refresh cookie.
-
-Пример signing helper:
-
-```ts
-private generateTokens(userId: string) {
-  const payload = { sub: userId };
-
-  return {
-    accessToken: this.jwtService.sign(payload, {
-      expiresIn: this.accessTtl,
-    }),
-    refreshToken: this.jwtService.sign(payload, {
-      expiresIn: this.refreshTtl,
-    }),
-  };
-}
-```
-
-На практике стоит продумать:
-
-- rotation refresh tokens;
-- revoke/logout strategy;
-- отдельный secret/key policy;
-- issuer/audience, если система распределенная;
-- куда попадет токен в browser app;
-- CSRF-риск, если cookie участвует в auth.
-
-### Passport strategy
-
-Passport в Nest позволяет вынести извлечение и проверку токена в strategy:
+Guard может распознать текущего пользователя любым способом, который выбрал проект. В Nest-коде его задача остается одинаковой: достать данные запроса, проверить их и либо пропустить handler, либо выбросить исключение.
 
 ```ts
 @Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(
-    config: ConfigService,
-    private readonly usersService: UsersService,
-  ) {
-    super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ignoreExpiration: false,
-      secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
-    });
-  }
+export class AuthGuard implements CanActivate {
+  constructor(private readonly authService: AuthService) {}
 
-  async validate(payload: { sub: string }) {
-    return this.usersService.findAuthUser(payload.sub);
+  async canActivate(context: ExecutionContext) {
+    const request = context.switchToHttp().getRequest<Request & {
+      user?: AuthUser;
+    }>();
+
+    const user = await this.authService.resolveUser(request);
+
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+
+    request.user = user;
+    return true;
   }
 }
 ```
 
+Так controller не знает деталей аутентификации:
+
 ```ts
-@Injectable()
-export class JwtAuthGuard extends AuthGuard('jwt') {}
+@UseGuards(AuthGuard)
+@Get('me')
+getMe(@CurrentUser() user: AuthUser) {
+  return user;
+}
 ```
 
-После успешной strategy Passport кладет результат `validate()` в `request.user`. Отсюда удобно сделать param decorator:
+### Current user decorator
 
 ```ts
 export const CurrentUser = createParamDecorator(
-  (_: unknown, ctx: ExecutionContext) => {
-    const request = ctx.switchToHttp().getRequest<{ user: AuthUser }>();
+  (_: unknown, context: ExecutionContext) => {
+    const request = context.switchToHttp().getRequest<{ user: AuthUser }>();
     return request.user;
   },
 );
 ```
 
-### Roles
+Это маленькая вещь, но она убирает `@Req()` из большинства handlers и делает контракт controller-а яснее.
 
-Roles хорошо подходят для крупного уровня доступа:
+### Roles and permissions
 
-- user;
-- moderator;
-- admin.
+Nest metadata позволяет связать access policy с handler-ом:
+
+```ts
+export const Roles = (...roles: Role[]) => SetMetadata('roles', roles);
+```
 
 ```ts
 @Roles(Role.Admin)
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(AuthGuard, RolesGuard)
 @Get('users')
 findAllUsers() {}
 ```
 
-### Permissions
-
-Когда ролей становится слишком много, переходите к permissions/claims/policies:
-
-- `links:create`;
-- `links:delete:any`;
-- `users:ban`;
-- `billing:refund`.
-
-Roles отвечают "к какому классу относится субъект". Permissions отвечают "какое действие он может выполнить". В production permission model обычно устойчивее, чем вечное добавление ролей под каждую кнопку.
+`RolesGuard` читает metadata через `Reflector` и сверяет ее с пользователем в request. Если нужен более точный доступ, идея остается той же: вместо ролей metadata может описывать permissions или policy key.
 
 ### Auth pitfalls
 
-- хранить raw password;
-- возвращать password hash из `getMe`;
-- различать "email не существует" и "пароль неверный" в login error;
-- хранить JWT secret в репозитории;
-- путать 401 и 403;
-- верить роли из body запроса;
-- делать guard единственным местом доменной проверки ownership.
+- проверять доступ прямо в каждом controller вручную;
+- использовать DTO для решения access policy;
+- путать ошибку "не распознан субъект" и ошибку "прав не хватает";
+- считать guard достаточной заменой ownership-проверке в service;
+- протаскивать raw request во все use cases вместо компактного auth context.
 
-Например, guard может сказать "пользователь авторизован", но сервис все равно должен проверить, что конкретная ссылка принадлежит этому пользователю.
+### Practical auth module
 
-### A practical auth split
-
-Хороший auth module обычно делится так:
+Nest-only разбиение обычно выглядит так:
 
 ```text
 auth/
   dto/
-    register.dto.ts
-    login.dto.ts
+  decorators/
   guards/
-    jwt-auth.guard.ts
-    roles.guard.ts
-  strategies/
-    jwt.strategy.ts
   auth.controller.ts
   auth.service.ts
   auth.module.ts
 ```
 
-В контроллере удобно оставить только transport:
+Controller держит transport-контракт. Guard защищает handlers. Service решает auth use cases. Decorators делают controller чище. Эта композиция важнее конкретного способа хранения сессии или credential-а.
 
-```ts
-@Post('login')
-@HttpCode(HttpStatus.OK)
-login(
-  @Body() dto: LoginDto,
-  @Res({ passthrough: true }) response: Response,
-) {
-  return this.authService.login(dto, response);
-}
-```
+## 13. Data access as Nest providers
 
-В сервисе живут:
-
-- поиск пользователя;
-- password verify;
-- token issue/refresh;
-- cookie setup;
-- ошибки use case.
-
-Strategy отвечает за чтение access token from request and loading auth user. Guard включает strategy on protected routes. Decorator делает `CurrentUser` ergonomic. Это и есть "как части работают вместе", а не просто набор auth snippets.
-
-## 13. Database layer
-
-### Prisma
-
-Материалы много используют Prisma. Базовый паттерн:
+Nest не диктует конкретный storage tool. Для него слой данных важен как граница зависимостей.
 
 ```ts
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit {
-  async onModuleInit() {
-    await this.$connect();
+export class MoviesRepository {
+  async findById(id: string): Promise<Movie | null> {
+    // Call the chosen storage adapter here.
+    return null;
   }
 }
 ```
-
-```ts
-async create(dto: CreateLinkDto, userId: string) {
-  const shortCode = randomBytes(5).toString('hex');
-
-  return this.prisma.link.create({
-    data: {
-      originalUrl: dto.originalUrl,
-      shortCode,
-      user: {
-        connect: { id: userId },
-      },
-    },
-  });
-}
-```
-
-Полезные Prisma приемы из практики:
-
-- `select` ограничивает возвращаемые поля;
-- `include` поднимает relations;
-- `connect` связывает существующие записи;
-- unique fields позволяют использовать `findUnique`;
-- schema relations должны отражать реальную ownership-модель.
-
-### TypeORM
-
-TypeORM в материалах тоже разбирается:
-
-- entities через decorators;
-- repositories через DI;
-- columns and relations;
-- `OneToMany`, `ManyToMany`, `OneToOne`;
-- TypeORM config через `ConfigModule`.
-
-Пример repository-oriented service:
 
 ```ts
 @Injectable()
 export class MoviesService {
-  constructor(
-    @InjectRepository(MovieEntity)
-    private readonly moviesRepository: Repository<MovieEntity>,
-  ) {}
+  constructor(private readonly moviesRepository: MoviesRepository) {}
 
-  create(dto: CreateMovieDto) {
-    const movie = this.moviesRepository.create(dto);
-    return this.moviesRepository.save(movie);
+  async findOne(id: string) {
+    const movie = await this.moviesRepository.findById(id);
+
+    if (!movie) {
+      throw new NotFoundException('Movie not found');
+    }
+
+    return movie;
   }
 }
 ```
 
-### Sequelize
+Что здесь важно именно для Nest:
 
-Один из исходных практических блоков строит приложение через Sequelize and PostgreSQL. В Nest это тоже module/provider integration:
+- data provider регистрируется в module;
+- service зависит от provider через DI;
+- controller зависит от service, а не от storage details;
+- в тесте provider можно заменить через `useValue`, `useClass` или override;
+- lifecycle hook можно использовать, если provider должен открыть или закрыть ресурс.
 
-- подключаете database module/config;
-- описываете models and relations;
-- инжектите model/repository abstraction в service;
-- оставляете controller тонким.
+### Repository boundary
 
-Сам ORM не меняет главную Nest-идею. Ошибка начинается не с выбора Prisma, TypeORM или Sequelize, а когда persistence details протекают в каждый controller и response contract.
+Repository boundary полезна, если она делает use case понятнее:
 
-### Repository pattern
+- прячет сложный query shape;
+- дает бизнес-имя операции;
+- ограничивает то, что service знает о storage adapter;
+- делает мок зависимости точным.
 
-Нужен ли отдельный repository слой поверх Prisma/TypeORM? Ответ зависит от сложности.
-
-Делайте repository, если:
-
-- persistence logic повторяется;
-- нужны сложные query methods с бизнес-именами;
-- один use case не должен знать детали ORM;
-- хотите изолировать transaction boundaries.
-
-Не делайте механический wrapper `UserRepository.findUnique()` вокруг каждого Prisma method только ради слоя. Это добавляет код без смысла.
-
-### Transactions
-
-Транзакция нужна, когда несколько изменений должны случиться вместе:
-
-- создать order и order items;
-- списать balance и записать ledger event;
-- создать link и initial audit record.
-
-Prisma-style:
-
-```ts
-await this.prisma.$transaction(async (tx) => {
-  const order = await tx.order.create({ data: orderData });
-
-  await tx.orderItem.createMany({
-    data: items.map((item) => ({
-      orderId: order.id,
-      productId: item.productId,
-      quantity: item.quantity,
-    })),
-  });
-});
-```
-
-Транзакция не исправляет плохую модель конкуренции автоматически. Для money-like доменов думайте про idempotency, unique constraints и race conditions.
-
-### Local database in development
-
-В исходниках PostgreSQL часто поднимается через Docker. Это хороший базовый dev setup: приложение живет локально, база воспроизводима, credentials идут из env.
-
-```yaml
-services:
-  postgres:
-    image: postgres:16
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: nest_app
-      POSTGRES_USER: nest
-      POSTGRES_PASSWORD: nest
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
-```
-
-Не делайте production password из tutorial compose. Смысл примера в воспроизводимости локальной среды, а не в готовой security policy.
+Не надо создавать слой ради слоя. Если новый provider только повторяет названия методов нижнего adapter-а и ничего не проясняет, он не улучшил Nest-архитектуру.
 
 ## 14. Config management
 
@@ -1090,25 +930,23 @@ export class AppModule {}
 
 ```ts
 const port = configService.get<number>('PORT', 3000);
-const jwtSecret = configService.getOrThrow<string>('JWT_SECRET');
+const publicUrl = configService.getOrThrow<string>('PUBLIC_URL');
 ```
 
 Для модулей лучше выносить config factory:
 
 ```ts
-export const getJwtConfig = (config: ConfigService): JwtModuleOptions => ({
-  secret: config.getOrThrow<string>('JWT_SECRET'),
-  signOptions: {
-    algorithm: 'HS256',
-  },
+export const getAppConfig = (config: ConfigService) => ({
+  publicUrl: config.getOrThrow<string>('PUBLIC_URL'),
+  requestTimeoutMs: config.get<number>('REQUEST_TIMEOUT_MS', 5000),
 });
 ```
 
 ```ts
-JwtModule.registerAsync({
+FeatureModule.registerAsync({
   imports: [ConfigModule],
   inject: [ConfigService],
-  useFactory: getJwtConfig,
+  useFactory: getAppConfig,
 });
 ```
 
@@ -1116,7 +954,7 @@ JwtModule.registerAsync({
 
 - URLs;
 - secrets;
-- TTL;
+- timeouts;
 - ports;
 - CORS origins;
 - cookie domain and secure policy;
@@ -1128,7 +966,7 @@ JwtModule.registerAsync({
 - тарифные правила;
 - большие JSON-конфиги, которыми должен управлять бизнес.
 
-Production best practice: валидируйте environment на старте. Падение при boot из-за отсутствующего `DATABASE_URL` лучше, чем загадочные 500 после первого запроса.
+Production best practice: валидируйте environment на старте. Падение при boot из-за отсутствующего обязательного значения лучше, чем загадочные 500 после первого запроса.
 
 ## 15. Async patterns
 
@@ -1178,128 +1016,55 @@ const response = await firstValueFrom(
 - `@Interval()` повторяет задачу через интервал;
 - `@Timeout()` запускает один раз после delay.
 
-Cron годится для периодической синхронизации, reminders, cleanup. Он не заменяет reliable queue, если задача должна пережить рестарт, retry и горизонтальное масштабирование.
+Cron годится для периодической синхронизации, reminders и cleanup. Но это другой lifecycle, чем обычный HTTP handler: отдельно продумайте повторный запуск, ошибки и поведение при нескольких экземплярах приложения.
 
-### Background jobs
+## 16. Custom decorators and composition
 
-Для тяжелых и надежных background tasks используйте queue:
+Custom decorators are one of the most practical Nest tools. They let controllers say what they mean instead of repeating request plumbing.
 
-- email sending;
-- transcoding;
-- image processing;
-- webhook retry;
-- imports/exports.
-
-Практическая логика:
-
-- HTTP endpoint быстро принимает команду;
-- пишет job в очередь;
-- worker обрабатывает;
-- status/result отслеживается отдельно.
-
-## 16. OpenAPI and Swagger
-
-Swagger в Nest полезен не как "красивый экран", а как контракт с frontend и QA.
+Param decorator:
 
 ```ts
-const config = new DocumentBuilder()
-  .setTitle('Movies API')
-  .setDescription('Movies backend')
-  .setVersion('1.0.0')
-  .addBearerAuth()
-  .build();
-
-const document = SwaggerModule.createDocument(app, config);
-SwaggerModule.setup('docs', app, document);
+export const UserAgent = createParamDecorator(
+  (_: unknown, context: ExecutionContext) => {
+    const request = context.switchToHttp().getRequest<Request>();
+    return request.headers['user-agent'];
+  },
+);
 ```
 
-DTO:
-
 ```ts
-export class CreateMovieDto {
-  @ApiProperty({
-    description: 'Movie title',
-    example: 'Fight Club',
-  })
-  title!: string;
-
-  @ApiPropertyOptional({
-    description: 'Poster URL',
-    example: 'https://storage.example.com/posters/123.png',
-  })
-  posterUrl?: string;
+@Get('profile')
+getProfile(@UserAgent() userAgent?: string) {
+  return { userAgent };
 }
 ```
 
-Endpoint:
+Decorator composition is useful when one route convention always means several Nest decorators:
 
 ```ts
-@ApiOperation({ summary: 'Create movie' })
-@ApiCreatedResponse({ type: MovieResponseDto })
-@ApiBadRequestResponse({ description: 'Invalid input' })
-@Post()
-create(@Body() dto: CreateMovieDto) {}
+export function PrivateRoute(...roles: Role[]) {
+  return applyDecorators(
+    Roles(...roles),
+    UseGuards(AuthGuard, RolesGuard),
+  );
+}
+```
+
+```ts
+@PrivateRoute(Role.Admin)
+@Delete(':id')
+remove(@Param('id') id: string) {}
 ```
 
 Mini best practices:
 
-- описывайте request and response DTO;
-- добавляйте bearer auth metadata для protected routes;
-- не документируйте успех и забывайте ошибки;
-- публикуйте JSON/YAML spec, если frontend генерирует types/client.
+- wrap repeated Nest metadata and guard combinations;
+- keep decorator names explicit;
+- do not hide business writes inside decorators;
+- prefer one readable composite decorator over five copy-pasted decorators on every protected handler.
 
-## 17. GraphQL в NestJS
-
-GraphQL в материалах появляется как отдельный transport:
-
-- вместо controllers используются resolvers;
-- query получает данные;
-- mutation меняет состояние;
-- модели описываются через `@ObjectType()` и `@Field()`;
-- вход описывается через `@InputType()`;
-- все запросы идут через GraphQL endpoint.
-
-```ts
-@ObjectType()
-export class UserModel {
-  @Field(() => ID)
-  id!: string;
-
-  @Field()
-  email!: string;
-}
-```
-
-```ts
-@InputType()
-export class RegisterInput {
-  @Field()
-  @IsEmail()
-  email!: string;
-
-  @Field()
-  @MinLength(8)
-  password!: string;
-}
-```
-
-```ts
-@Resolver(() => UserModel)
-export class UsersResolver {
-  constructor(private readonly usersService: UsersService) {}
-
-  @Query(() => [UserModel], { name: 'users' })
-  findAll() {
-    return this.usersService.findAll();
-  }
-}
-```
-
-HTTP `@Req()` and `@Res()` do not move into GraphQL unchanged. Request/response usually come through GraphQL context. Guards for GraphQL also need `GqlExecutionContext` when they extract request data.
-
-GraphQL pitfall: GraphQL schema is a public contract too. If you expose `password` field in a model just because Prisma model has it, the transport will happily serve it when queried.
-
-## 18. WebSockets
+## 17. WebSockets
 
 WebSockets нужны, когда сервер должен сам пушить события клиенту:
 
@@ -1316,15 +1081,15 @@ export class ChatGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
   @WebSocketServer()
-  server!: Server;
+  server!: MessageBroadcaster;
 
   constructor(private readonly chatService: ChatService) {}
 
-  handleConnection(client: Socket) {
+  handleConnection(client: ConnectedClient) {
     console.log('connected', client.id);
   }
 
-  handleDisconnect(client: Socket) {
+  handleDisconnect(client: ConnectedClient) {
     console.log('disconnected', client.id);
   }
 
@@ -1346,7 +1111,7 @@ Production notes:
 - не транслируйте всем то, что должно уйти room/channel;
 - при нескольких instances нужен adapter/infra strategy для fanout.
 
-## 19. Microservices
+## 18. Microservices
 
 Исходные материалы microservices в основном упоминают. В Nest это еще один transport mode, где похожая архитектура работает не через HTTP route, а через message patterns.
 
@@ -1385,7 +1150,7 @@ export class MathController {
 
 Nest дает transports and client proxies. Архитектурную цену распределенной системы он не отменяет.
 
-## 20. Работа с файлами
+## 19. Работа с файлами
 
 Upload:
 
@@ -1401,7 +1166,7 @@ upload(
       ],
     }),
   )
-  file: Express.Multer.File,
+  file: UploadedFilePayload,
 ) {
   return this.filesService.upload(file);
 }
@@ -1414,66 +1179,28 @@ upload(
 - file validators можно встроить в `ParseFilePipe`;
 - статическую раздачу можно включить через `ServeStaticModule`.
 
-Но хранить production uploads на локальном диске приложения часто плохая идея. Для обычного web backend лучше объектное хранилище и контролируемые public/private URLs.
+Главная Nest-идея здесь та же: transport-specific parsing stays near the controller, а use case получает уже понятный аргумент.
 
-## 21. External HTTP with HttpModule
-
-`HttpModule` нужен, когда backend ходит в чужой API:
-
-- Spotify;
-- payment provider;
-- geo service;
-- internal service.
-
-Паттерн:
-
-```ts
-@Module({
-  imports: [HttpModule.register({ timeout: 5000 })],
-  providers: [SpotifyService],
-  exports: [SpotifyService],
-})
-export class SpotifyModule {}
-```
-
-```ts
-const response = await firstValueFrom(
-  this.httpService.get<SpotifyArtist>(`/artists/${id}`, {
-    headers: {
-      Authorization: `Bearer ${this.accessToken}`,
-    },
-  }),
-);
-```
-
-Реальная ценность wrapper service:
-
-- один раз реализовать authentication внешнего API;
-- централизовать headers/timeouts/error mapping;
-- спрятать внешний shape данных от остального приложения.
-
-Pitfall: не тащите response object чужого API насквозь до своего controller-а без выбора полей. Внешний контракт не должен случайно стать вашим контрактом.
-
-## 22. Dynamic modules
+## 20. Dynamic modules
 
 Dynamic module полезен, когда модуль требует конфигурацию.
 
 ```ts
-SpotifyModule.forRoot({
-  clientId: '...',
-  clientSecret: '...',
+AuditModule.forRoot({
+  enabled: true,
+  context: 'movies-api',
 });
 ```
 
 или:
 
 ```ts
-SpotifyModule.forRootAsync({
+AuditModule.forRootAsync({
   imports: [ConfigModule],
   inject: [ConfigService],
   useFactory: (config: ConfigService) => ({
-    clientId: config.getOrThrow('SPOTIFY_CLIENT_ID'),
-    clientSecret: config.getOrThrow('SPOTIFY_CLIENT_SECRET'),
+    enabled: config.get<boolean>('AUDIT_ENABLED', true),
+    context: config.get<string>('APP_NAME', 'api'),
   }),
 });
 ```
@@ -1487,7 +1214,7 @@ SpotifyModule.forRootAsync({
 
 Это полезно для reusable internal modules и библиотек. Не превращайте каждую фичу в dynamic module. Если `MoviesModule` не требует вариантов конфигурации, обычный module проще.
 
-## 23. Testing
+## 21. Testing
 
 ### Unit tests
 
@@ -1496,20 +1223,18 @@ Unit test проверяет класс в изоляции.
 ```ts
 const moduleRef = await Test.createTestingModule({
   providers: [
-    LinksService,
+    MoviesService,
     {
-      provide: PrismaService,
+      provide: MoviesRepository,
       useValue: {
-        link: {
-          create: jest.fn(),
-          findUnique: jest.fn(),
-        },
+        findById: async () => null,
+        create: async (dto: CreateMovieDto) => ({ id: 'movie-1', ...dto }),
       },
     },
   ],
 }).compile();
 
-service = moduleRef.get(LinksService);
+service = moduleRef.get(MoviesService);
 ```
 
 Что unit-testить:
@@ -1545,12 +1270,6 @@ beforeAll(async () => {
   await app.init();
 });
 
-it('POST /links creates a link', async () => {
-  await request(app.getHttpServer())
-    .post('/links')
-    .send({ originalUrl: 'https://example.com' })
-    .expect(201);
-});
 ```
 
 E2E особенно нужны для:
@@ -1559,18 +1278,18 @@ E2E особенно нужны для:
 - validation;
 - status codes;
 - filters/interceptors wiring;
-- DB integration;
+- module wiring;
 - route protection.
 
 ### Testing best practices
 
 - тестовые env отдельно от production;
-- clean database state;
-- external APIs mock/fake;
+- clean shared state;
+- external boundaries fake where the Nest test does not target them;
 - проверяйте not only happy path;
 - global pipes in tests должны совпадать с app bootstrap, иначе e2e врет.
 
-## 24. Production practices
+## 22. Production practices
 
 ### Validation everywhere at boundaries
 
@@ -1578,21 +1297,19 @@ E2E особенно нужны для:
 
 - HTTP body/query/params;
 - WebSocket payload;
-- GraphQL inputs;
 - env;
-- external payload, которому не доверяете.
+- payload, которому не доверяете.
 
 ### Security baseline
 
 Минимальный backend baseline:
 
-- `helmet` before route setup where relevant;
 - CORS allowlist, а не бездумная `*` при credentials;
 - rate limiting на auth and abuse-prone endpoints;
 - secure cookie policy;
 - secrets out of repo;
-- password hashing;
-- least privilege database credentials;
+- secret handling;
+- explicit access rules;
 - avoid leaking stack traces.
 
 ### Logging
@@ -1601,8 +1318,8 @@ Nest `Logger` лучше `console.log` как общий стиль. Логир�
 
 - unexpected errors;
 - request id / correlation id;
-- external service failures;
-- background job failures;
+- provider failures;
+- scheduled task failures;
 - auth anomalies carefully, без токенов и паролей.
 
 Материалы показывают custom logger, который пишет в файл. Для production часто удобнее structured logs в stdout + collector. Важнее не место файла, а то, чтобы логи были структурированы, доступны и не утекали секреты.
@@ -1616,7 +1333,7 @@ this.logger.log(
 );
 ```
 
-Но access token, refresh token, password, cookie value and card data в лог не попадают. "Полезно для отладки" не оправдывает постоянную утечку секретов.
+Но credentials, secrets, cookie values and private data в лог не попадают. "Полезно для отладки" не оправдывает постоянную утечку секретов.
 
 ### Error handling
 
@@ -1624,7 +1341,7 @@ this.logger.log(
 
 - error shape;
 - mapping domain errors to HTTP;
-- retry behavior for external services;
+- retry behavior for failing providers where it is required;
 - metrics for 5xx;
 - alerting criteria.
 
@@ -1632,10 +1349,10 @@ this.logger.log(
 
 Nest scale plan обычно идет так:
 
-1. модульность и database indexes;
+1. модульность и границы providers;
 2. pagination and query discipline;
 3. cache where justified;
-4. background jobs;
+4. вынос долгой работы из request handler-а;
 5. horizontal stateless app instances;
 6. разделение сервисов только после появления настоящих границ.
 
@@ -1656,7 +1373,7 @@ app.enableVersioning({
 
 Версионирование важно, когда API уже имеет клиентов и вы меняете контракт несовместимо.
 
-## 25. Реальный mini-project: short links
+## 23. Реальный mini-project: short links
 
 Практический проект из материалов хорошо показывает, как части Nest складываются вместе.
 
@@ -1675,7 +1392,7 @@ app.enableVersioning({
 - app/root handler делает public redirect;
 - statistics module не смешивается с links CRUD;
 - common decorators дают `ClientIp` and `UserAgent`;
-- Prisma relations связывают user, link, click.
+- data providers связывают use cases с хранением данных.
 
 ### Мини-проверки, которые стоит добавить
 
@@ -1687,25 +1404,25 @@ app.enableVersioning({
 - validation and sanitization around URLs;
 - avoid relying on fake local dev IP in production code path.
 
-## 26. Частые ошибки новичков
+## 24. Частые ошибки новичков
 
 1. Писать всю логику в controller.
 2. Считать DTO обычным TypeScript type и не включать runtime validation.
 3. Экспортировать все providers из каждого module.
 4. Делать `@Global()` для всего, чтобы "не импортировать".
-5. Возвращать ORM model с password hash.
+5. Возвращать наружу внутреннюю модель без response contract.
 6. Использовать middleware вместо guards для authorization policy.
 7. Ловить каждую ошибку `try/catch` и возвращать `null`.
 8. Не различать `401 Unauthorized` и `403 Forbidden`.
 9. Создавать giant `CommonService`, куда стекается все.
-10. Забывать `select` and pagination, а потом отдавать весь dataset.
+10. Забывать pagination, а потом отдавать весь dataset.
 11. Смешивать config access через `process.env` по всему проекту.
 12. Не тестировать wiring: validation, auth, status codes.
 13. Думать, что microservices автоматически делают архитектуру лучше.
 14. Подменять repository слоем без смысла, только добавляя boilerplate.
 15. Не документировать API, пока frontend уже начал угадывать payloads.
 
-## 27. Roadmap изучения NestJS
+## 25. Roadmap изучения NestJS
 
 ### Stage 1: фундамент
 
@@ -1716,7 +1433,7 @@ app.enableVersioning({
 - DTO;
 - validation;
 - pipes;
-- basic Prisma or TypeORM CRUD.
+- базовый CRUD через controllers, services и providers.
 
 ### Stage 2: request pipeline
 
@@ -1726,29 +1443,26 @@ app.enableVersioning({
 - filters;
 - custom decorators;
 - error contract;
-- Swagger.
+- decorator composition.
 
 ### Stage 3: real backend
 
-- JWT auth;
-- Passport;
+- auth guards;
+- access metadata;
 - roles and permissions;
 - config module;
-- transactions;
+- provider boundaries;
 - testing module;
 - unit and e2e tests;
 - logs, CORS, security baseline.
 
 ### Stage 4: extra transports and scaling
 
-- GraphQL if product benefits from it;
 - WebSockets for realtime;
-- queues and background jobs;
 - cron with clear limits;
-- external API wrappers;
 - microservices only with real deployment boundaries.
 
-## 28. Production backend structure recommendation
+## 26. Production backend structure recommendation
 
 Для большинства рабочих REST backends начните так:
 
@@ -1758,11 +1472,9 @@ src/
   app.module.ts
   config/
     app.config.ts
-    jwt.config.ts
   infra/
-    prisma/
-    storage/
-    mail/
+    persistence/
+    integrations/
   modules/
     auth/
     users/
@@ -1791,12 +1503,11 @@ links/
 Если проект крупнее, добавляйте:
 
 - policy layer for authorization decisions;
-- job processors;
 - domain events;
 - application use cases;
 - repository interfaces only where substitution or boundary pays off.
 
-## 29. Финальные советы по архитектуре
+## 27. Финальные советы по архитектуре
 
 - Держите transport thin and services explicit.
 - Делайте dependencies visible through constructors.
@@ -1808,25 +1519,23 @@ links/
 
 NestJS особенно хорош не тогда, когда вы знаете названия всех декораторов, а когда умеете выбрать правильное место для следующей строки кода.
 
-## 30. Что было добавлено сверх исходников
+## 28. Что было добавлено сверх исходников
 
-Исходники дали практическую основу по:
+Исходники дали практическую основу по Nest:
 
 - modules/controllers/services/DI;
 - REST, DTO, validation, pipes;
 - guards/interceptors/filters/middleware;
-- Prisma and TypeORM;
-- JWT auth, Passport-like strategy flow, roles;
-- Swagger, GraphQL, WebSockets;
-- unit/e2e testing;
-- HttpModule, dynamic modules, files, CORS, cron, versioning, logging;
-- short-link project and structure examples.
+- custom decorators and access metadata;
+- WebSocket gateways and microservice handlers;
+- testing module and e2e wiring;
+- dynamic modules, files, CORS, cron, versioning, logging;
+- structure examples through a short-link domain.
 
 По официальной документации NestJS дополнены и уточнены:
 
 - provider scopes;
 - lifecycle hooks and shutdown;
-- permission/claims framing for authorization;
+- authorization through guards and metadata;
 - microservices entry pattern;
-- queues as a background-job tool;
-- env validation and security baseline notes.
+- env validation and production baseline notes.
